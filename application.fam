@@ -1,0 +1,17 @@
+App(
+    appid="flipper_laser_tag",
+    name="Laser Tag",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="flipper_laser_tag_app",
+    stack_size=2 * 1024,
+    requires=["gui", "input", "notification"],
+    fap_category="Games",
+
+    fap_description="Multiplayer infrared laser tag for Flipper Zero.",
+    fap_author="Khalifa Rouis",
+    fap_weburl="https://github.com/krouis/flipper-laser-tag",
+    fap_version="0.1.0",
+
+    fap_icon="flipper_laser_tag.png",
+    fap_icon_assets="images",
+)

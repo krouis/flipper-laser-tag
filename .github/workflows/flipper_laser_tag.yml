@@ -1,0 +1,41 @@
+name: Build Flipper Laser Tag
+
+on:
+  push:
+    paths:
+      - "**.c"
+      - "**.h"
+      - "application.fam"
+      - ".github/workflows/flipper_laser_tag.yml"
+  pull_request:
+    paths:
+      - "**.c"
+      - "**.h"
+      - "application.fam"
+      - ".github/workflows/flipper_laser_tag.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ufbt
+        run: pip install ufbt
+
+      - name: Build FAP
+        run: ufbt
+
+      - name: Upload FAP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flipper_laser_tag
+          path: dist/flipper_laser_tag.fap
+          if-no-files-found: error
