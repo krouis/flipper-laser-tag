@@ -137,7 +137,7 @@ static void flt_handle_shot_received(FlipperLaserTagApp* app, const InfraredMess
         return;
     }
     if(msg->command != FLT_SHOT_COMMAND) {
-        FURI_LOG_D(TAG, "Ignoring unknown command 0x%02X", msg->command);
+        FURI_LOG_D(TAG, "Ignoring unknown command 0x%02lX", msg->command);
         return;
     }
 
