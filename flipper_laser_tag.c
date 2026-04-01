@@ -34,6 +34,8 @@ typedef struct {
 
     // Set in ISR; cleared in main loop after sending notification
     volatile bool hit_notify_pending;
+    // ID of the last player who landed a hit (written in ISR, read in main loop)
+    volatile uint8_t last_shooter_id;
     // Tick value after which hits are accepted again
     volatile uint32_t cooldown_until_ticks;
 
@@ -48,6 +50,10 @@ typedef struct {
 static void flt_viewport_draw_callback(Canvas* canvas, void* ctx);
 static void flt_input_callback(InputEvent* event, void* ctx);
 static void flt_handle_shot_received(FlipperLaserTagApp* app, const InfraredMessage* msg);
+static void flt_rx_capture_cb(void* ctx, bool level, uint32_t duration);
+static void flt_rx_timeout_cb(void* ctx);
+static void flt_start_rx(FlipperLaserTagApp* app);
+static void flt_stop_rx(void);
 
 // ---------- IR TX: provide pulses to HAL ----------
 
@@ -61,6 +67,8 @@ static FuriHalInfraredTxGetDataState
     FlipperLtTxContext* tx = context;
 
     if(tx->last_sent) {
+        *duration = 0;
+        *level = false;
         return FuriHalInfraredTxGetDataStateLastDone;
     }
 
@@ -69,25 +77,41 @@ static FuriHalInfraredTxGetDataState
     case InfraredStatusOk:
         return FuriHalInfraredTxGetDataStateOk;
     case InfraredStatusDone:
+        // Signal end-of-transmission: duration/level are valid from infrared_encode.
+        // LastDone (not Done) is required so wait_termination() exits naturally.
         tx->last_sent = true;
-        return FuriHalInfraredTxGetDataStateDone;
+        return FuriHalInfraredTxGetDataStateLastDone;
     default:
         tx->last_sent = true;
+        *duration = 0;
+        *level = false;
         return FuriHalInfraredTxGetDataStateLastDone;
     }
 }
 
-// Send one IR "shot" frame
-static void flt_send_shot(FlipperLaserTagApp* app) {
-    if(furi_hal_infrared_is_busy()) {
-        FURI_LOG_D(TAG, "IR busy, skipping shot");
-        return;
-    }
+static void flt_start_rx(FlipperLaserTagApp* app) {
+    FURI_LOG_D(TAG, "Starting IR RX");
 
+    furi_hal_infrared_async_rx_start();
+    furi_hal_infrared_async_rx_set_timeout(FLT_RX_SILENCE_TIMEOUT_US);
+    furi_hal_infrared_async_rx_set_capture_isr_callback(flt_rx_capture_cb, app);
+    furi_hal_infrared_async_rx_set_timeout_isr_callback(flt_rx_timeout_cb, app);
+}
+
+static void flt_stop_rx(void) {
+    FURI_LOG_D(TAG, "Stopping IR RX");
+    furi_hal_infrared_async_rx_stop();
+}
+
+// Send one IR "shot" frame
+static bool flt_send_shot(FlipperLaserTagApp* app) {
     FlipperLtTxContext tx_ctx = {
         .encoder = app->ir_encoder,
         .last_sent = false,
     };
+
+    // RX must be stopped before TX, otherwise IR remains busy and the shot is skipped
+    flt_stop_rx();
 
     app->tx_msg.protocol = InfraredProtocolNEC;
     app->tx_msg.address = app->player_id;
@@ -99,17 +123,28 @@ static void flt_send_shot(FlipperLaserTagApp* app) {
     uint32_t freq = infrared_get_protocol_frequency(app->tx_msg.protocol);
     float duty = infrared_get_protocol_duty_cycle(app->tx_msg.protocol);
 
-    FURI_LOG_D(TAG, "Sending shot: player_id=0x%02X cmd=0x%02X freq=%lu", app->player_id, FLT_SHOT_COMMAND, freq);
+    FURI_LOG_D(
+        TAG,
+        "Sending shot: player_id=0x%02X cmd=0x%02X freq=%lu",
+        app->player_id,
+        FLT_SHOT_COMMAND,
+        freq);
 
     furi_hal_infrared_set_tx_output(FuriHalInfraredTxPinInternal);
     furi_hal_infrared_async_tx_set_data_isr_callback(flt_tx_get_data_isr, &tx_ctx);
     furi_hal_infrared_async_tx_start(freq, duty);
 
+    // wait_termination() blocks until LastDone, then frees all TX resources.
+    // Do NOT call async_tx_stop() after this — stop() calls wait_termination()
+    // internally and would crash because state is already InfraredStateIdle.
     furi_hal_infrared_async_tx_wait_termination();
-    furi_hal_infrared_async_tx_stop();
+
+    // Resume RX immediately after TX
+    flt_start_rx(app);
 
     app->shot_flash = true;
     FURI_LOG_I(TAG, "Shot fired");
+    return true;
 }
 
 // ---------- IR RX: capture and decode ----------
@@ -156,11 +191,10 @@ static void flt_handle_shot_received(FlipperLaserTagApp* app, const InfraredMess
     if(app->hp > 0) {
         app->hp--;
         app->hit_flash = true;
+        app->last_shooter_id = shooter_id;
         app->hit_notify_pending = true;
         app->cooldown_until_ticks = furi_get_tick() + furi_ms_to_ticks(FLT_HIT_COOLDOWN_MS);
-        FURI_LOG_I(TAG, "Hit by 0x%02X! HP: %u/%u", shooter_id, app->hp, FLT_STARTING_HP);
-    } else {
-        FURI_LOG_D(TAG, "Hit ignored — already dead (shooter=0x%02X)", shooter_id);
+        // Logging is not ISR-safe; the main loop emits the hit log via hit_notify_pending.
     }
 }
 
@@ -224,19 +258,22 @@ int32_t flipper_laser_tag_app(void* p) {
     app.shot_flash = false;
     app.hit_flash = false;
     app.hit_notify_pending = false;
+    app.last_shooter_id = 0;
     app.cooldown_until_ticks = 0;
 
-    FURI_LOG_I(TAG, "Starting: player=%s id=0x%02X hp=%u", app.player_name ? app.player_name : "???", app.player_id, app.hp);
+    FURI_LOG_I(
+        TAG,
+        "Starting: player=%s id=0x%02X hp=%u",
+        app.player_name ? app.player_name : "???",
+        app.player_id,
+        app.hp);
 
     // Allocate IR encoder/decoder
     app.ir_encoder = infrared_alloc_encoder();
     app.ir_decoder = infrared_alloc_decoder();
 
     // Start RX
-    furi_hal_infrared_async_rx_start();
-    furi_hal_infrared_async_rx_set_timeout(FLT_RX_SILENCE_TIMEOUT_US);
-    furi_hal_infrared_async_rx_set_capture_isr_callback(flt_rx_capture_cb, &app);
-    furi_hal_infrared_async_rx_set_timeout_isr_callback(flt_rx_timeout_cb, &app);
+    flt_start_rx(&app);
 
     // Open notification service
     app.notifications = furi_record_open(RECORD_NOTIFICATION);
@@ -264,10 +301,15 @@ int32_t flipper_laser_tag_app(void* p) {
             if(event.type == InputTypeShort && event.key == InputKeyOk) {
                 bool in_cooldown = furi_get_tick() < app.cooldown_until_ticks;
                 if(app.hp > 0 && !in_cooldown) {
-                    flt_send_shot(&app);
-                    notification_message(app.notifications, &sequence_success);
+                    if(flt_send_shot(&app)) {
+                        notification_message(app.notifications, &sequence_success);
+                    }
                 } else {
-                    FURI_LOG_D(TAG, "Shot blocked: hp=%u cooldown=%s", app.hp, in_cooldown ? "yes" : "no");
+                    FURI_LOG_D(
+                        TAG,
+                        "Shot blocked: hp=%u cooldown=%s",
+                        app.hp,
+                        in_cooldown ? "yes" : "no");
                 }
             } else if(event.type == InputTypeShort && event.key == InputKeyBack) {
                 FURI_LOG_I(TAG, "Back pressed, exiting");
@@ -278,6 +320,8 @@ int32_t flipper_laser_tag_app(void* p) {
         // Process hit notification queued from ISR
         if(app.hit_notify_pending) {
             app.hit_notify_pending = false;
+            uint8_t shooter = app.last_shooter_id;
+            FURI_LOG_I(TAG, "Hit by 0x%02X! HP: %u/%u (cooldown %lums)", shooter, app.hp, FLT_STARTING_HP, (uint32_t)FLT_HIT_COOLDOWN_MS);
             notification_message(app.notifications, &sequence_error);
             if(app.hp == 0) {
                 FURI_LOG_I(TAG, "Player eliminated");
@@ -294,7 +338,7 @@ int32_t flipper_laser_tag_app(void* p) {
     view_port_free(app.view_port);
     furi_message_queue_free(app.input_queue);
 
-    furi_hal_infrared_async_rx_stop();
+    flt_stop_rx();
 
     infrared_free_encoder(app.ir_encoder);
     infrared_free_decoder(app.ir_decoder);
