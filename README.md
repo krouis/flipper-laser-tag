@@ -12,17 +12,17 @@ A multiplayer infrared laser tag game for the Flipper Zero. Players shoot each o
 - Press **OK** to fire a shot. Your device name is embedded in every shot so the receiver knows who fired.
 - A valid hit from any other player reduces your HP by 1 and triggers an **error sound + vibration**.
 - Firing triggers a **success sound + vibration** as confirmation.
-- After taking a hit you enter a **3-second cooldown** — you cannot shoot or be hit again until it expires. The screen shows `COOLDOWN...` during this period.
-- At **0 HP** the screen shows `GAME OVER` and shooting is disabled.
+- After taking a hit you enter a **5-second cooldown** — you cannot shoot or be hit again until it expires. The screen shows the shooter's ID and `Cooldown` during this period.
+- At **0 HP** the screen shows `GAME OVER`. Press **OK** to restart with full HP, or **BACK** to exit.
 - Press **BACK** at any time to exit.
 
 ### Display
 
 ```
 Laser Tag
-Player: Plasma        #your Flipper's name (Settings > Desktop > Name)
+Player: Plasma           #your Flipper's name (Settings > Desktop > Name)
 HP: 4/5
-COOLDOWN...           #or: OK: Shoot   BACK: Exit / SHOT! / HIT! / GAME OVER
+0x42 hit you! Cooldown   #or: OK: Shoot   BACK: Exit / SHOT! / HIT by 0x42! / GAME OVER  OK:Restart
 ```
 
 ### Player identity

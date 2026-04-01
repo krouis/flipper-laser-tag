@@ -14,7 +14,7 @@
 #define FLT_STARTING_HP           5
 #define FLT_SHOT_COMMAND          0x42
 #define FLT_RX_SILENCE_TIMEOUT_US 60000U
-#define FLT_HIT_COOLDOWN_MS       3000U
+#define FLT_HIT_COOLDOWN_MS       5000U
 
 // Main loop tick interval (ms) — keeps hit-notify processing responsive
 #define FLT_LOOP_TICK_MS 50U
@@ -220,12 +220,14 @@ static void flt_viewport_draw_callback(Canvas* canvas, void* ctx) {
         canvas_draw_str(canvas, 4, 56, "SHOT!");
         app->shot_flash = false;
     } else if(app->hit_flash) {
-        canvas_draw_str(canvas, 4, 56, "HIT!");
+        snprintf(buf, sizeof(buf), "HIT by 0x%02X!", app->last_shooter_id);
+        canvas_draw_str(canvas, 4, 56, buf);
         app->hit_flash = false;
     } else if(app->hp == 0) {
-        canvas_draw_str(canvas, 4, 56, "GAME OVER");
+        canvas_draw_str(canvas, 4, 56, "GAME OVER  OK:Restart");
     } else if(furi_get_tick() < app->cooldown_until_ticks) {
-        canvas_draw_str(canvas, 4, 56, "COOLDOWN...");
+        snprintf(buf, sizeof(buf), "0x%02X hit you! Cooldown", app->last_shooter_id);
+        canvas_draw_str(canvas, 4, 56, buf);
     } else {
         canvas_draw_str(canvas, 4, 56, "OK: Shoot   BACK: Exit");
     }
@@ -299,17 +301,24 @@ int32_t flipper_laser_tag_app(void* p) {
 
         if(status == FuriStatusOk) {
             if(event.type == InputTypeShort && event.key == InputKeyOk) {
-                bool in_cooldown = furi_get_tick() < app.cooldown_until_ticks;
-                if(app.hp > 0 && !in_cooldown) {
-                    if(flt_send_shot(&app)) {
-                        notification_message(app.notifications, &sequence_success);
-                    }
+                if(app.hp == 0) {
+                    // Restart game
+                    app.hp = FLT_STARTING_HP;
+                    app.shot_flash = false;
+                    app.hit_flash = false;
+                    app.hit_notify_pending = false;
+                    app.last_shooter_id = 0;
+                    app.cooldown_until_ticks = 0;
+                    FURI_LOG_I(TAG, "Game restarted");
                 } else {
-                    FURI_LOG_D(
-                        TAG,
-                        "Shot blocked: hp=%u cooldown=%s",
-                        app.hp,
-                        in_cooldown ? "yes" : "no");
+                    bool in_cooldown = furi_get_tick() < app.cooldown_until_ticks;
+                    if(!in_cooldown) {
+                        if(flt_send_shot(&app)) {
+                            notification_message(app.notifications, &sequence_success);
+                        }
+                    } else {
+                        FURI_LOG_D(TAG, "Shot blocked: cooldown active");
+                    }
                 }
             } else if(event.type == InputTypeShort && event.key == InputKeyBack) {
                 FURI_LOG_I(TAG, "Back pressed, exiting");
